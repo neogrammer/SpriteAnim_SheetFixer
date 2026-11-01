@@ -1,171 +1,76 @@
+// Behavior.h
+// The current behavior of an actor: a std::variant of state structs and the
+// dispatch around it. Generic on purpose: nothing in here names a state.
+//
+// Every state provides
+//     void enter(Actor&);
+//     Next update(Actor&, float dt);        Next = std::optional<StateVariant>
+// and may provide
+//     Next onHit(Actor&, const HitEvent&);  omitted = the state ignores hits
+//
+// A state never changes the variant it lives in (that would destroy the
+// object whose member function is running). It returns the next state and
+// Behavior swaps it in after the visit has returned.
 #pragma once
-#include <type_traits>
-#include <iostream>
 
-class Defend
+#include <optional>
+#include <utility>
+#include <variant>
+
+class Actor;
+struct HitEvent;
+
+template <typename StateVariant>
+class Behavior
 {
-	float _a{};
-	float _b{};
 public:
-	Defend() {}
-	~Defend() {}
-	Defend(const Defend&) = default;
-	Defend& operator=(const Defend&) = default;
-	Defend(Defend&&) = delete;
-	Defend operator=(Defend&&) = delete;
+    using Next = std::optional<StateVariant>;
 
-	void Start(float a, float b)
-	{
-		std::cout << "Defend is starting" << std::endl;
+    // Replace the current state with S built from args, then enter it.
+    template <typename S, typename... Args>
+    void start(Actor& actor, Args&&... args)
+    {
+        m_state.template emplace<S>(std::forward<Args>(args)...);
+        std::get<S>(m_state).enter(actor);
+    }
 
-		_a = a;
-		_b = b;
-	}
+    // Replace the current state with a ready-made one, then enter it.
+    void set(Actor& actor, StateVariant state)
+    {
+        m_state = std::move(state);
+        std::visit([&](auto& s) { s.enter(actor); }, m_state);
+    }
 
-	float GetA() const { return _a; }
-	float GetB() const { return _b; }
-};
+    void update(Actor& actor, float dt)
+    {
+        apply(actor, std::visit([&](auto& s) -> Next { return s.update(actor, dt); }, m_state));
+    }
 
-class Attack
-{
-	double _a{};
-	double _b{};
-public:
-	Attack() {}
-	~Attack() {}
-	Attack(const Attack&) = default;
-	Attack& operator=(const Attack&) = default;
-	Attack(Attack&&) = delete;
-	Attack operator=(Attack&&) = delete;
-	void Start(double a, double b)
-	{
-		std::cout << "Attack is starting" << std::endl;
+    void onHit(Actor& actor, const HitEvent& hit)
+    {
+        apply(actor, std::visit([&](auto& s) -> Next
+            {
+                if constexpr (requires { s.onHit(actor, hit); })
+                    return s.onHit(actor, hit);
+                else
+                    return std::nullopt;
+            }, m_state));
+    }
 
-		_a = a;
-		_b = b;
-	}
+    template <typename S>
+    bool is() const { return std::holds_alternative<S>(m_state); }
 
-	double GetA() const { return _a; }
-	double GetB() const { return _b; }
-};
+    const char* name() const
+    {
+        return std::visit([](const auto& s) { return s.name; }, m_state);
+    }
 
-class Patrol
-{
-	int _a{};
-	int _b{};
-public:
-	Patrol() {}
-	~Patrol() {}
-	Patrol(const Patrol&) = default;
-	Patrol& operator=(const Patrol&) = default;
-	Patrol(Patrol&&) = delete;
-	Patrol operator=(Patrol&&) = delete;
+private:
+    void apply(Actor& actor, Next next)
+    {
+        if (next)
+            set(actor, std::move(*next));
+    }
 
-	void Start(int a, int b)
-	{
-		std::cout << "Patrol is starting" << std::endl;
-
-		_a = a;
-		_b = b;
-	}
-
-	int GetA() const { return _a; }
-	int GetB() const { return _b; }
-};
-
-class TakeHit
-{
-	std::string _a{ "" };
-	std::string _b{ "" };
-
-public:
-	TakeHit() {}
-	~TakeHit() {}
-	TakeHit(const TakeHit&) = default;
-	TakeHit& operator=(const TakeHit&) = default;
-	TakeHit(TakeHit&&) = delete;
-	TakeHit operator=(TakeHit&&) = delete;
-
-	void Start(std::string a, std::string b)
-	{
-		std::cout << "TakeHit is starting" << std::endl;
-
-		_a = a;
-		_b = b;
-	}
-
-	std::string GetA() const { return _a; }
-	std::string GetB() const { return _b; }
-};
-
-// must be copyable
-template <typename T>
-class Behavior 
-{
-
-	T m_theType{};
-	public:
-		Behavior() = default;
-		
-		T& get()
-		{
-			//decltype(*this->m_theType) theType{};
-			//if (decltype(*m_theType) == Defend)
-			if constexpr (std::is_same_v<T, Defend>)
-				std::cout << "Behavior<Defend> is the behavior type" << std::endl;
-			//if (decltype(*m_theType) == Attack)
-			if constexpr (std::is_same_v<T, Attack>)
-				std::cout << "Behavior<Attack> is the behavior type" << std::endl;
-			//if (decltype(*m_theType) == Patrol)
-			if constexpr (std::is_same_v<T, Patrol>)
-				std::cout << "Behavior<Patrol> is the behavior type" << std::endl;
-			//if (decltype(*m_theType) == TakeHit)
-			if constexpr (std::is_same_v<T, TakeHit>)
-				std::cout << "Behavior<TakeHit> is the behavior type" << std::endl;
-
-			return m_theType;
-		}
-
-		const T& get() const
-		{
-			if constexpr (std::is_same_v<T, Defend>)
-				std::cout << "Behavior<Defend> is the behavior type" << std::endl;
-			//if (decltype(*m_theType) == Attack)
-			if constexpr (std::is_same_v<T, Attack>)
-				std::cout << "Behavior<Attack> is the behavior type" << std::endl;
-			//if (decltype(*m_theType) == Patrol)
-			if constexpr (std::is_same_v<T, Patrol>)
-				std::cout << "Behavior<Patrol> is the behavior type" << std::endl;
-			//if (decltype(*m_theType) == TakeHit)
-			if constexpr (std::is_same_v<T, TakeHit>)
-				std::cout << "Behavior<TakeHit> is the behavior type" << std::endl;
-
-			return m_theType;
-		}
-
-		template<typename... Args>
-		void Start(Args... args)
-		{
-			if constexpr (std::is_same_v<T, Defend>)
-			{
-				std::cout << "Behavior<Defend> is starting" << std::endl;
-			}
-			//if (decltype(*m_theType) == Attack)
-			if constexpr (std::is_same_v<T, Attack>)
-			{
-				std::cout << "Behavior<Attack> is starting" << std::endl;
-			}
-			//if (decltype(*m_theType) == Patrol)
-			if constexpr (std::is_same_v<T, Patrol>)
-			{
-				std::cout << "Behavior<Patrol> is starting" << std::endl;
-			}
-			//if (decltype(*m_theType) == TakeHit)
-			if constexpr (std::is_same_v<T, TakeHit>)
-			{
-				std::cout << "Behavior<TakeHit> is starting" << std::endl;
-			}
-
-			
-		}
+    StateVariant m_state{};   // starts as the first alternative
 };

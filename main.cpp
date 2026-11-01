@@ -1,3 +1,5 @@
+#include "Game.h"
+
 #include <SFML/Graphics.hpp>
 #include <stdexcept>
 #include <algorithm>
@@ -9,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -42,9 +45,23 @@ constexpr int kRowOverlapPercent = 50;
 // as artwork (portraits, posters) and put on a row of their own.
 constexpr int kOversizedFactor = 2;
 
-// Frame duration written to sprite_sheet.cfg for every animation. Edit the
-// numbers in the .cfg afterwards to give animations their own speeds.
+// Frame duration written to the .cfg for every animation. Edit the numbers
+// in the .cfg afterwards to give animations their own speeds.
 constexpr float kDefaultSecondsPerFrame = 0.1f;
+
+// On attack-like animations, a frame whose artwork reaches at least this
+// many pixels past the body box gets a hit box for the part that sticks out.
+constexpr int kHitProtrusion = 4;
+
+// Animations whose name contains one of these get hit boxes and play once.
+const char* const kAttackWords[] = {
+    "attack", "slash", "swing", "punch", "kick", "stab", "strike", "shoot"
+};
+
+// Animations whose name contains one of these play once (no hit boxes).
+const char* const kOnceWords[] = {
+    "hurt", "hit", "flinch", "damage", "dead", "die", "death", "jump", "land"
+};
 
 // ---------------------------------------------------------------------------
 // Data
@@ -110,6 +127,11 @@ struct Animation
 
     // Bottom edge the frames are lined up on, in original sheet coordinates.
     int baseline = 0;
+
+    // Collision boxes in cell coordinates (see measureHurtBox / measureHitBoxes).
+    Box hurt;
+    std::vector<std::optional<Box>> hits;   // one slot per frame
+    bool once = false;
 };
 
 // Which region each pixel of the original belongs to (-1 = transparent).
@@ -161,6 +183,19 @@ std::string toLower(std::string text)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
     return text;
+}
+
+bool nameContainsAny(const std::string& name, const char* const* words, std::size_t count)
+{
+    const std::string lower = toLower(name);
+
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        if (lower.find(words[i]) != std::string::npos)
+            return true;
+    }
+
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -595,6 +630,83 @@ std::vector<Animation> askAnimationsForRow(
 // Output
 // ---------------------------------------------------------------------------
 
+// Where a frame's artwork sits inside its cell (inclusive, cell coordinates):
+// centred horizontally, lined up on the animation's baseline.
+Box cellBounds(const Animation& animation, const Sprite& frame)
+{
+    const int offsetX =
+        (static_cast<int>(animation.frameWidth) - frame.box.width()) / 2;
+
+    const int rise = animation.baseline - frame.box.bottom;
+
+    const int offsetY =
+        static_cast<int>(animation.frameHeight) - frame.box.height() - rise;
+
+    return { offsetX, offsetY,
+             offsetX + frame.box.width() - 1,
+             offsetY + frame.box.height() - 1 };
+}
+
+// The body box: the part of the cell that every frame covers. Swinging
+// limbs and weapons move from frame to frame, so they fall outside it.
+// If the frames vary so much that the common part is tiny (a spin, a long
+// lunge), the union of all frames is used instead. Edit the hurt line in
+// the .cfg when the default is off for a particular animation.
+void measureHurtBox(Animation& animation)
+{
+    Box common = cellBounds(animation, animation.frames.front());
+    Box all = common;
+
+    for (const auto& frame : animation.frames)
+    {
+        const Box b = cellBounds(animation, frame);
+
+        common.left = std::max(common.left, b.left);
+        common.top = std::max(common.top, b.top);
+        common.right = std::min(common.right, b.right);
+        common.bottom = std::min(common.bottom, b.bottom);
+
+        all.include(b);
+    }
+
+    const bool usable =
+        common.right >= common.left && common.bottom >= common.top &&
+        common.width() * 2 >= all.width() && common.height() * 2 >= all.height();
+
+    animation.hurt = usable ? common : all;
+}
+
+// On attack-like animations, the part of a frame that reaches past the body
+// box (the weapon) becomes that frame's hit box. Other animations get none,
+// so a stretched foot in a walk cycle never hurts anyone.
+void measureHitBoxes(Animation& animation)
+{
+    animation.hits.assign(animation.frames.size(), std::nullopt);
+
+    if (!nameContainsAny(animation.name, kAttackWords, std::size(kAttackWords)))
+        return;
+
+    for (std::size_t i = 0; i < animation.frames.size(); ++i)
+    {
+        const Box b = cellBounds(animation, animation.frames[i]);
+
+        const int rightReach = b.right - animation.hurt.right;
+        const int leftReach = animation.hurt.left - b.left;
+
+        if (std::max(rightReach, leftReach) < kHitProtrusion)
+            continue;
+
+        Box hit = b;
+
+        if (rightReach >= leftReach)
+            hit.left = animation.hurt.right + 1;
+        else
+            hit.right = animation.hurt.left - 1;
+
+        animation.hits[i] = hit;
+    }
+}
+
 // Every frame of an animation gets the same cell: as wide as the widest
 // frame, and tall enough to keep each frame at its original height above
 // the animation's baseline (so feet stay planted instead of jittering).
@@ -619,6 +731,13 @@ void measureAnimation(Animation& animation)
             animation.frameHeight,
             static_cast<unsigned int>(frame.box.height() + rise));
     }
+
+    measureHurtBox(animation);
+    measureHitBoxes(animation);
+
+    animation.once =
+        nameContainsAny(animation.name, kAttackWords, std::size(kAttackWords)) ||
+        nameContainsAny(animation.name, kOnceWords, std::size(kOnceWords));
 }
 
 // Copies one sprite into the output. Only pixels that belong to the sprite's
@@ -691,19 +810,11 @@ bool createFixedSpritesheet(
 
         for (const auto& frame : animation.frames)
         {
-            const unsigned int offsetX =
-                (animation.frameWidth -
-                    static_cast<unsigned int>(frame.box.width())) / 2;
-
-            const unsigned int rise =
-                static_cast<unsigned int>(animation.baseline - frame.box.bottom);
-
-            const unsigned int offsetY =
-                animation.frameHeight -
-                static_cast<unsigned int>(frame.box.height()) - rise;
+            const Box cell = cellBounds(animation, frame);
 
             copySprite(original, map, frame, output,
-                cellX + offsetX, cellY + offsetY);
+                cellX + static_cast<unsigned int>(cell.left),
+                cellY + static_cast<unsigned int>(cell.top));
 
             cellX += animation.frameWidth;
         }
@@ -714,13 +825,8 @@ bool createFixedSpritesheet(
     return output.saveToFile(outputPath);
 }
 
-// Writes sprite_sheet.cfg describing the output sheet, one line per
-// animation, so a game can rebuild every frame rectangle:
-//
-//   image megamanx_fixed.png
-//   anim <name> <frames> <frameWidth> <frameHeight> <rowY> <secondsPerFrame>
-//
-// Frame i of an animation sits at x = i * frameWidth, y = rowY.
+// Writes the .cfg describing the output sheet so the game can rebuild every
+// frame rectangle and collision box. SpriteSheet.h documents the format.
 bool writeConfig(
     const std::vector<Animation>& animations,
     const fs::path& imagePath,
@@ -734,9 +840,16 @@ bool writeConfig(
 
     out << "# Sprite sheet config written by Sprite Sheet Processor\n"
         << "# image <file next to this config>\n"
+        << "# facing left | right            which way the artwork faces (default right)\n"
         << "# anim <name> <frames> <frameWidth> <frameHeight> <rowY> <secondsPerFrame>\n"
-        << "# Frame i of an animation is at x = i * frameWidth, y = rowY.\n\n"
-        << "image " << imagePath.filename().string() << "\n\n";
+        << "#   frame i of an animation is at x = i * frameWidth, y = rowY\n"
+        << "#   the lines after an anim line belong to it:\n"
+        << "#   loop | once                  repeat (default) or stop on the last frame\n"
+        << "#   next <anim>                  animation to play after a once animation ends\n"
+        << "#   hurt <x> <y> <w> <h>         body box in cell coordinates (auto: area every frame covers)\n"
+        << "#   hit <i> <x> <y> <w> <h>      damage box on frame i (auto on attack-like names: the part past the body)\n\n"
+        << "image " << imagePath.filename().string() << "\n"
+        << "facing right\n\n";
 
     unsigned int rowTop = 0;
 
@@ -749,6 +862,25 @@ bool writeConfig(
             << rowTop << ' '
             << secondsPerFrame << '\n';
 
+        if (animation.once)
+            out << "once\n";
+
+        out << "hurt " << animation.hurt.left << ' ' << animation.hurt.top << ' '
+            << animation.hurt.width() << ' ' << animation.hurt.height() << '\n';
+
+        for (std::size_t i = 0; i < animation.hits.size(); ++i)
+        {
+            if (!animation.hits[i])
+                continue;
+
+            const Box& hit = *animation.hits[i];
+
+            out << "hit " << i << ' ' << hit.left << ' ' << hit.top << ' '
+                << hit.width() << ' ' << hit.height() << '\n';
+        }
+
+        out << '\n';
+
         rowTop += animation.frameHeight;
     }
 
@@ -756,105 +888,13 @@ bool writeConfig(
 }
 
 // ---------------------------------------------------------------------------
-sf::Texture spriteAtlas{ "assets/alucard_fixed.png" };
-sf::Sprite alucard{ spriteAtlas };
-
-struct OuterBox
-{
-	sf::IntRect rect;
-};
-
-struct CollisionBox
-{
-	sf::IntRect inTexRect;
-	sf::Vector2f offset;
-};
-
-struct Frame
-{
-	OuterBox outerBox;
-	CollisionBox collisionBox;
- };
-
-static Frame MakeFrame(sf::IntRect outer_, sf::IntRect collision_, sf::Vector2f offset_)
-{
-	Frame frame;
-	frame.outerBox.rect = outer_;
-	frame.collisionBox.inTexRect = collision_;
-	frame.collisionBox.offset = offset_;
-	return frame;
-}
-
-#include "Behavior.h"
-
-class Anim
-{
-    enum class FrameDirection
-    {
-        Left,
-        Right,
-        Front,
-        Back,
-        Uni
-    };
-
-
-    bool _isLoaded{false};
-    float _frameElapsed{0.f};
-    float _loopWaitElapsed{ 0.f };
-	int _currentFrame{ 0 };
-	bool _playing{ false };
-	bool _looping{ false };
-    int _loopCount{ 0 };
-	bool _reversed{ false };
-	bool _finished{ false };
-    bool _loopWaits{ false };
-    bool _isLoopWaiting{ false };
-	bool _flipFrames{ false };
-	FrameDirection _frameDirection{ FrameDirection::Uni };
-	FrameDirection _flippedFrames{ FrameDirection::Uni };
-
-public:
-
-    std::string name;
-    std::vector<Frame> frames;
-    std::vector<Frame> flippedFrames;
-    unsigned int frameWidth;
-    unsigned int frameHeight;
-    float baseline;
-    std::string nextAnimation{ "none" };
-
-
-
-
-
-    explicit Anim(const std::string& name_, unsigned int frameWidth_, unsigned int frameHeight_, float baseline_, bool flipFrames = false);
-    
-    void AddFrame(Frame& frame, bool last_ = false);
-    void AddFrame(sf::IntRect outer_, sf::IntRect collision_, sf::Vector2f offset_, bool last_ = false);
-    void AddFrames(const std::vector<sf::IntRect> outerRects_, const std::vector<sf::IntRect> collisionRects_, const std::vector<sf::Vector2f> offsets_, bool last_ = true);
-    void AddFrames(const std::vector<Frame> frames_, bool last_ = true);
-
-	Frame MakeFlippedFrame(Frame& frame_);
-
-
-   
-};
-
-
-bool Update(float dt_);
-void Render(sf::RenderWindow& wnd_);
-
-
 
 int main()
 {
     const std::string fixSheet = askString("Fix a Spritesheet(y/n)?  ");
 
-
     if (fixSheet == "y")
     {
-
         std::cout << "=== Sprite Sheet Processor ===\n\n";
 
         const std::string filename = askString("Enter spritesheet filename: ");
@@ -907,7 +947,9 @@ int main()
         {
             std::cout << "Preview with boxes around each sprite: "
                 << fs::absolute(previewPath) << "\n"
-                << "Open it to count frames before answering below.\n";
+                << "Open it to count frames before answering below.\n"
+                << "The game looks for animations named idle, walk, attack, hurt, "
+                "defend, defend_hit and dead.\n";
         }
 
         // 3. Ask how each row splits into animations.
@@ -934,7 +976,8 @@ int main()
             return 1;
         }
 
-        const fs::path configPath = directory / "sprite_sheet.cfg";
+        // One config per sheet, named after it: alucard.png -> alucard.cfg.
+        const fs::path configPath = directory / (stem + ".cfg");
 
         if (!writeConfig(animations, outputPath, configPath, kDefaultSecondsPerFrame))
         {
@@ -950,196 +993,29 @@ int main()
 
         for (const auto& animation : animations)
         {
+            std::size_t hitFrames = 0;
+            for (const auto& hit : animation.hits)
+                hitFrames += hit ? 1 : 0;
+
             std::cout << animation.name << ": " << animation.frames.size()
                 << " frames of " << animation.frameWidth << "x"
                 << animation.frameHeight << ", output row starts at Y="
-                << rowTop << '\n';
+                << rowTop << ", hurt box " << animation.hurt.width() << "x"
+                << animation.hurt.height();
+
+            if (hitFrames > 0)
+                std::cout << ", hit boxes on " << hitFrames << " frame(s)";
+
+            std::cout << '\n';
 
             rowTop += animation.frameHeight;
         }
 
         return 0;
     }
-    else
-    {
-        // run game
 
-        Behavior<TakeHit> takeHitBehavior{};
+    const std::string config = askString(
+        "Sprite config to run (e.g. assets/alucard.cfg): ");
 
-		auto& behavior = takeHitBehavior.get();
-        behavior.Start("Hello", "Shit");
-
-
-        auto b = behavior.GetB();
-        std::cout << "\nValue B: " << b << std::endl;
-
-        sf::RenderWindow wnd(sf::VideoMode({ 1600U,900U }, 32U), "Sprites");
-
-		bool running = true;
-        sf::Clock timer;
-        float dt{};
-        while (running)
-        {
-
-			while (const std::optional event = wnd.pollEvent())
-			{
-				if (event->is<sf::Event::Closed>())
-				{
-					running = false;
-				}
-				else if (const auto* keyPressed = event->getIf<sf::Event::KeyPressed>())
-				{
-					if (keyPressed->scancode == sf::Keyboard::Scancode::Escape)
-						running = false;
-				}
-			}
-			dt += timer.restart().asSeconds();
-			if (dt >= 1.f / 60.f)
-			{
-				if (!Update(dt))
-				{
-					running = false;
-				}
-                dt = 0.f;
-			}
-
-            if (running)
-                Render(wnd);
-
-
-
-        }
-
-        wnd.close();
-        return 0;
-
-    }
-
-}
-
-bool Update(float dt_)
-{
-    // Update the sprite
-        // Check if behavior of sprite has changed since last frame
-		//   if so, 
-				   // and start the Anim from the appropriate frame
-				   // update behavior of sprite accordingly
-				   // set texRect of the sprite to first frame of the new behavior
-                   // set dt_ to 0
-		   // if not, run current behavior of sprite's update function(dt_) <- changes behavior maybe, even to idle maybe
-	       // Update the sprite frame elapsed time += dt_ and switch frames if necessary
-		   // if frame switched, set the texRect of the sprite to the new frame
-        // 
-
-    return true;
-
-}
-
-void Render(sf::RenderWindow& wnd_)
-{
-    wnd_.clear();
-    
-    // Draw the animaed sprite frame
-    wnd_.draw(alucard);
-
-    wnd_.display();
-}
-
-
-
-Anim::Anim(const std::string& name_, unsigned int frameWidth_, unsigned int frameHeight_, float baseline_, bool isFlipped_)
-: name(name_), frameWidth(frameWidth_), frameHeight(frameHeight_), baseline(baseline_), _flipFrames(isFlipped_) {
-}
-
-void Anim::AddFrame(Frame& frame, bool last_)
-{
-	if (_isLoaded)
-    {
-        throw std::logic_error("Anim is already loaded.");
-    }
-    frames.push_back(frame);
-
-    if (_flipFrames)
-    {
-        Frame flippedFrame = MakeFlippedFrame(frame);
-        flippedFrames.push_back(flippedFrame);
-    }
-    _isLoaded = last_;
-}
-void Anim::AddFrame(sf::IntRect outer_, sf::IntRect collision_, sf::Vector2f offset_, bool last_)
-{
-    if (_isLoaded)
-    {
-        throw std::logic_error("Anim is already loaded.");
-    }
-    Frame frame;
-    frame.outerBox.rect = outer_;
-    frame.collisionBox.inTexRect = collision_;
-    frame.collisionBox.offset = offset_;
-    frames.push_back(frame);
-
-	if (_flipFrames)        
-	{
-		Frame flippedFrame = MakeFlippedFrame(frame);
-		flippedFrames.push_back(flippedFrame);
-	}
-    _isLoaded = last_;
-
-}
-void Anim::AddFrames(const std::vector<sf::IntRect> outerRects_, const std::vector<sf::IntRect> collisionRects_, const std::vector<sf::Vector2f> offsets_ , bool last_)
-{
-    if (_isLoaded)
-    {
-        throw std::logic_error("Anim is already loaded.");
-    }
-    if (outerRects_.size() != collisionRects_.size() || outerRects_.size() != offsets_.size())
-    {
-        throw std::invalid_argument("Input vectors must have the same size.");
-    }
-    for (std::size_t i = 0; i < outerRects_.size(); ++i)
-    {
-        Frame frame;
-        frame.outerBox.rect = outerRects_[i];
-        frame.collisionBox.inTexRect = collisionRects_[i];
-        frame.collisionBox.offset = offsets_[i];
-        frames.push_back(frame);
-
-		if (_flipFrames)
-		{
-			Frame flippedFrame = MakeFlippedFrame(frame);
-			flippedFrames.push_back(flippedFrame);
-		}
-    }
-    _isLoaded = last_;
-
-}
-void Anim::AddFrames(const std::vector<Frame> frames_, bool last_)
-{
-    if (_isLoaded)
-    {
-        throw std::logic_error("Anim is already loaded.");
-    }
-   
-    for (std::size_t i = 0; i < frames_.size(); ++i)
-    {
-        Frame frame;
-        frame.outerBox.rect = frames_[i].outerBox.rect;
-        frame.collisionBox.inTexRect = frames_[i].collisionBox.inTexRect;
-        frame.collisionBox.offset = frames_[i].collisionBox.offset;
-        frames.push_back(frame);
-
-        if (_flipFrames)
-        {
-			Frame flippedFrame = MakeFlippedFrame(frame);
-			flippedFrames.push_back(flippedFrame);
-        }
-    }
-    _isLoaded = last_;
-}
-
-Frame Anim::MakeFlippedFrame(Frame& frame_)
-{
-	Frame flippedFrame;
-    flippedFrame.outerBox.rect = sf::IntRect({ frame_.outerBox.rect.position.x + frame_.outerBox.rect.size.x - 1,	frame_.outerBox.rect.position.y }, {frame_.outerBox.rect.size.x, frame_.outerBox.rect.size.y});
-	return flippedFrame;
+    return runGame(config, config);
 }
