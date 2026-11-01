@@ -1,47 +1,5 @@
 #include <SFML/Graphics.hpp>
 #include <stdexcept>
-//
-//
-//
-//int main()
-//{
-//
-//	sf::RenderWindow window{ sf::VideoMode{{1600U,900U}, 32U}, "TestProgram" };
-//
-//    sf::Texture tex{ "assets/DaisyAtlas.png" };
-//
-//    sf::Sprite spr{ tex };
-//    int sprW{ 109 }, sprH{ 192 };
-//    int texX{ 0 }, texY{ 0 };
-//    float sprX{ 800.f }, sprY{ 450.f };
-//    spr.setTextureRect(sf::IntRect{ {texX,texY},{sprW,sprH} });
-//    spr.setPosition({ sprX, sprY });
-//
-//	while (window.isOpen())
-//	{
-//        while (const std::optional event = window.pollEvent())
-//        {
-//            if (event->is<sf::Event::Closed>())
-//            {
-//                window.close();
-//            }
-//            else if (const auto* keyPressed = event->getIf<sf::Event::KeyPressed>())
-//            {
-//                if (keyPressed->scancode == sf::Keyboard::Scancode::Escape)
-//                    window.close();
-//            }
-//        }
-//
-//        window.clear();
-//        window.draw(spr);
-//        window.display();
-//	}
-//
-//
-//	return 0;
-//}
-
-
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
@@ -827,6 +785,8 @@ static Frame MakeFrame(sf::IntRect outer_, sf::IntRect collision_, sf::Vector2f 
 	return frame;
 }
 
+#include "Behavior.h"
+
 class Anim
 {
     enum class FrameDirection
@@ -1004,10 +964,14 @@ int main()
     {
         // run game
 
+        Behavior<TakeHit> takeHitBehavior{};
+
+		auto& behavior = takeHitBehavior.get();
+        behavior.Start("Hello", "Shit");
 
 
-
-
+        auto b = behavior.GetB();
+        std::cout << "\nValue B: " << b << std::endl;
 
         sf::RenderWindow wnd(sf::VideoMode({ 1600U,900U }, 32U), "Sprites");
 

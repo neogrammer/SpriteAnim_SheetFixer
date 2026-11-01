@@ -9,5 +9,6 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Spritesheet.h" />
+    <ClInclude Include="Behavior.h" />
   </ItemGroup>
 </Project>

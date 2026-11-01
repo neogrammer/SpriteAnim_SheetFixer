@@ -71,8 +71,8 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>C:\sdks\sfml3\include;$(IncludePath)</IncludePath>
-    <LibraryPath>C:\sdks\sfml3\lib;$(LibraryPath)</LibraryPath>
+    <IncludePath>C:\tools\SFML3\include;$(IncludePath)</IncludePath>
+    <LibraryPath>C:\tools\SFML3\lib\Debug;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <IncludePath>C:\sdks\sfml\SFML-3.0.2\include;$(IncludePath)</IncludePath>
@@ -144,6 +144,7 @@
     <Image Include="assets\MMX_Best.png" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="Behavior.h" />
     <ClInclude Include="Spritesheet.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
